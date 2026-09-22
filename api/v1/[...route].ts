@@ -3,7 +3,7 @@ export const config = {
 };
 
 import { authenticate, HttpError } from '../../src/auth/bridge-key.js';
-import { config } from '../../src/config.js';
+import { config as appConfig } from '../../src/config.js';
 import { stProxyRequest } from '../../src/servicetitan/client.js';
 import { createJob, addJobNote, addAppointment } from '../../src/servicetitan/mutations.js';
 import { JobNoteSchema, AppointmentSchema, CreateJobSchema } from '../../src/schemas/mutations.js';
@@ -39,7 +39,7 @@ export default async function handler(req: Request) {
          throw new HttpError(400, 'VALIDATION_ERROR', 'Invalid path segments.');
       }
 
-      const allowedNamespaces = config.ALLOWED_READ_NAMESPACES.split(',').map(n => n.trim());
+      const allowedNamespaces = appConfig.ALLOWED_READ_NAMESPACES.split(',').map((n: string) => n.trim());
       if (!allowedNamespaces.includes(namespace)) {
         throw new HttpError(400, 'VALIDATION_ERROR', 'Namespace not allowed.');
       }
