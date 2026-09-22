@@ -13,10 +13,21 @@ const envSchema = z.object({
   UPSTREAM_TIMEOUT_MS: z.coerce.number().default(15000),
 });
 
-const parsed = envSchema.safeParse(process.env);
+const parsed = envSchema.safeParse({
+  ST_ENVIRONMENT: process.env.ST_ENVIRONMENT,
+  ST_CLIENT_ID: process.env.ST_CLIENT_ID,
+  ST_CLIENT_SECRET: process.env.ST_CLIENT_SECRET,
+  ST_APP_KEY: process.env.ST_APP_KEY,
+  ST_TENANT_ID: process.env.ST_TENANT_ID,
+  BRIDGE_KEY_STORE: process.env.BRIDGE_KEY_STORE,
+  ALLOWED_READ_NAMESPACES: process.env.ALLOWED_READ_NAMESPACES,
+  WRITE_MODE: process.env.WRITE_MODE,
+  LOG_LEVEL: process.env.LOG_LEVEL,
+  UPSTREAM_TIMEOUT_MS: process.env.UPSTREAM_TIMEOUT_MS,
+});
 
 export const configError = parsed.success ? null : parsed.error;
-export const config = parsed.success ? parsed.data : ({} as any);
+export const config = (parsed.success ? parsed.data : {}) as z.infer<typeof envSchema>;
 
 export function validateConfig() {
   if (configError) {
