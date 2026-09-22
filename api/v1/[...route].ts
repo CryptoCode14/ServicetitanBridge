@@ -27,7 +27,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     validateConfig();
 
-    const bridgeKey = req.headers['x-bridge-key'] as string;
+    const rawAuth = (req.headers['authorization'] || '') as string;
+    const bearerKey = rawAuth.toLowerCase().startsWith('bearer ') ? rawAuth.substring(7).trim() : null;
+    const bridgeKey = (req.headers['x-bridge-key'] as string) || bearerKey;
     const authContext = authenticate(bridgeKey);
 
     // ---------------------------------------------------------
@@ -66,6 +68,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // EXPLICIT MUTATIONS (POST)
     // ---------------------------------------------------------
     if (req.method === 'POST') {
+      if (appConfig.WRITE_MODE === 'off') {
+        throw new HttpError(403, 'WRITE_MODE_DISABLED', 'Writes are currently disabled in configuration.');
+      }
+      if (appConfig.WRITE_MODE === 'draft_estimates' && !pathname.endsWith('/v1/estimate-drafts')) {
+        throw new HttpError(403, 'WRITE_MODE_DISABLED', 'Only draft estimates are allowed in the current configuration.');
+      }
+
       const idempotencyKey = req.headers['idempotency-key'] as string;
       if (!idempotencyKey) {
         throw new HttpError(400, 'MISSING_IDEMPOTENCY_KEY', 'Idempotency-Key header is required for writes.');
