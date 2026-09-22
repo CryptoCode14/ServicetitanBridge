@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { authenticate, HttpError } from '../../src/auth/bridge-key.js';
-import { config as appConfig } from '../../src/config.js';
+import { config as appConfig, validateConfig } from '../../src/config.js';
 import { stProxyRequest } from '../../src/servicetitan/client.js';
 import { createJob, addJobNote, addAppointment } from '../../src/servicetitan/mutations.js';
 import { JobNoteSchema, AppointmentSchema, CreateJobSchema } from '../../src/schemas/mutations.js';
@@ -15,6 +15,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (pathname === '/healthz' || pathname === '/v1/health' || pathname.endsWith('/healthz') || pathname.endsWith('/v1/health')) {
       return res.status(200).json({ status: 'ok', service: 'servicetitan-bridge' });
     }
+
+    validateConfig();
 
     const bridgeKey = req.headers['x-bridge-key'] as string;
     const authContext = authenticate(bridgeKey);
@@ -112,6 +114,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     if (err.statusCode) {
       return res.status(err.statusCode).json({ error: err.code, message: err.message });
+    }
+    if (err.message?.includes("Invalid environment configuration")) {
+      return res.status(500).json({ error: 'ENVIRONMENT_CONFIGURATION_ERROR', message: err.message });
     }
     console.error("Unhandled Error:", err);
     return res.status(500).json({ error: 'INTERNAL_SERVER_ERROR' });

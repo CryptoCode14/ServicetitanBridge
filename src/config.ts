@@ -15,12 +15,14 @@ const envSchema = z.object({
 
 const parsed = envSchema.safeParse(process.env);
 
-if (!parsed.success) {
-  console.error("Environment Validation Error:", parsed.error.format());
-  throw new Error("Invalid environment configuration.");
-}
+export const configError = parsed.success ? null : parsed.error;
+export const config = parsed.success ? parsed.data : ({} as any);
 
-export const config = parsed.data;
+export function validateConfig() {
+  if (configError) {
+    throw new Error("Invalid environment configuration: " + configError.message);
+  }
+}
 
 export const hosts = {
   integration: 'https://api-integration.servicetitan.io',
