@@ -1,5 +1,5 @@
-export const configEdge = {
-  runtime: 'edge'
+export const config = {
+  runtime: 'nodejs'
 };
 
 import { authenticate, HttpError } from '../../src/auth/bridge-key.js';
