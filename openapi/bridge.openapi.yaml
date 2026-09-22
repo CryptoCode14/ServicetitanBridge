@@ -1,0 +1,27 @@
+openapi: 3.1.0
+info:
+  title: ServiceTitan Bridge API
+  version: "1.0"
+servers:
+  - url: https://api.yourdomain.com
+paths:
+  /healthz:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: OK
+  /v1/whoami:
+    get:
+      summary: Get client identity and capabilities
+      security:
+        - BridgeApiKey: []
+      responses:
+        '200':
+          description: OK
+components:
+  securitySchemes:
+    BridgeApiKey:
+      type: apiKey
+      in: header
+      name: X-Bridge-Key
