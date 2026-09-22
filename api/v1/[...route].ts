@@ -13,7 +13,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let pathname = req.url ? req.url.split('?')[0] : '/';
     
     if (pathname.endsWith('/debug-env')) {
-      return res.status(200).json({ keys: Object.keys(process.env) });
+      return res.status(200).json({ 
+        keys: Object.keys(process.env),
+        projectName: process.env.VERCEL_PROJECT_NAME,
+        url: process.env.VERCEL_URL,
+        gitSlug: process.env.VERCEL_GIT_REPO_SLUG
+      });
     }
 
     if (pathname === '/healthz' || pathname === '/v1/health' || pathname.endsWith('/healthz') || pathname.endsWith('/v1/health')) {
