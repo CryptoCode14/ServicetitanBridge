@@ -42,3 +42,7 @@ export async function getToken(): Promise<string> {
   
   return inFlight;
 }
+
+export function invalidateToken(): void {
+  cached = undefined;
+}

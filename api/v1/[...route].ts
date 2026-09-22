@@ -2,99 +2,112 @@ export const configEdge = {
   runtime: 'edge'
 };
 
-import { authenticate } from '../../src/auth/bridge-key.js';
+import { authenticate, HttpError } from '../../src/auth/bridge-key.js';
 import { config } from '../../src/config.js';
-import { searchCustomers, getCustomer } from '../../src/servicetitan/customers.js';
-import { listJobs, getJob } from '../../src/servicetitan/jobs.js';
+import { stProxyRequest } from '../../src/servicetitan/client.js';
+import { createJob, addJobNote, addAppointment } from '../../src/servicetitan/mutations.js';
+import { JobNoteSchema, AppointmentSchema, CreateJobSchema } from '../../src/schemas/mutations.js';
 import { createEstimateDraft } from '../../src/servicetitan/estimates.js';
 import { CreateEstimateDraftRequestSchema } from '../../src/schemas/estimates.js';
-import { HttpError } from '../../src/auth/bridge-key.js';
+import { withIdempotency } from '../../src/policy/idempotency.js';
 
 export default async function handler(req: Request) {
   try {
     const url = new URL(req.url);
-    const pathname = url.pathname;
+    let pathname = url.pathname;
     
-    // Health and public routes
-    if (pathname === '/healthz') {
-      return new Response(JSON.stringify({ status: 'ok' }), { 
+    if (pathname === '/healthz' || pathname === '/v1/health') {
+      return new Response(JSON.stringify({ status: 'ok', service: 'servicetitan-bridge' }), { 
         status: 200, 
         headers: { 'Content-Type': 'application/json' } 
       });
     }
 
-    // Authenticate all other routes
     const bridgeKey = req.headers.get('x-bridge-key');
-    authenticate(bridgeKey);
+    const authContext = authenticate(bridgeKey);
 
-    if (pathname === '/v1/whoami') {
-      return new Response(JSON.stringify({ 
-        client: 'known_client',
-        environment: config.ST_ENVIRONMENT,
-        capabilities: ['estimates:draft:create', 'customers:read', 'jobs:read']
-      }), { 
-        status: 200, 
-        headers: { 'Content-Type': 'application/json' } 
+    // ---------------------------------------------------------
+    // GET PROXY
+    // ---------------------------------------------------------
+    if (req.method === 'GET' && pathname.startsWith('/v1/proxy/')) {
+      const parts = pathname.replace('/v1/proxy/', '').split('/');
+      const namespace = parts[0];
+      const restOfPath = parts.slice(1).join('/');
+
+      // Path hardening
+      if (restOfPath.includes('..') || restOfPath.includes('\\') || restOfPath.includes('\0') || restOfPath.includes('//')) {
+         throw new HttpError(400, 'VALIDATION_ERROR', 'Invalid path segments.');
+      }
+
+      const allowedNamespaces = config.ALLOWED_READ_NAMESPACES.split(',').map(n => n.trim());
+      if (!allowedNamespaces.includes(namespace)) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'Namespace not allowed.');
+      }
+
+      return await stProxyRequest('GET', namespace, restOfPath, url.searchParams.toString());
+    }
+
+    if (pathname.startsWith('/v1/proxy/') && req.method !== 'GET') {
+      return new Response(JSON.stringify({ error: 'METHOD_NOT_ALLOWED' }), { 
+        status: 405, 
+        headers: { 'Allow': 'GET', 'Content-Type': 'application/json' } 
       });
     }
 
     // ---------------------------------------------------------
-    // Customers
+    // EXPLICIT MUTATIONS (POST)
     // ---------------------------------------------------------
-    if (req.method === 'GET' && pathname === '/v1/customers') {
-      const page = parseInt(url.searchParams.get('page') || '1', 10);
-      const pageSize = parseInt(url.searchParams.get('pageSize') || '50', 10);
-      const name = url.searchParams.get('name') || undefined;
-      const result = await searchCustomers({ page, pageSize, name });
-      return new Response(JSON.stringify(result), { status: 200, headers: { 'Content-Type': 'application/json' } });
-    }
-
-    const customerMatch = pathname.match(/^\/v1\/customers\/(\d+)$/);
-    if (req.method === 'GET' && customerMatch) {
-      const id = customerMatch[1];
-      const result = await getCustomer(id);
-      return new Response(JSON.stringify({ data: result }), { status: 200, headers: { 'Content-Type': 'application/json' } });
-    }
-
-    // ---------------------------------------------------------
-    // Jobs
-    // ---------------------------------------------------------
-    if (req.method === 'GET' && pathname === '/v1/jobs') {
-      const page = parseInt(url.searchParams.get('page') || '1', 10);
-      const pageSize = parseInt(url.searchParams.get('pageSize') || '50', 10);
-      const status = url.searchParams.get('status') || undefined;
-      const result = await listJobs({ page, pageSize, status });
-      return new Response(JSON.stringify(result), { status: 200, headers: { 'Content-Type': 'application/json' } });
-    }
-
-    const jobMatch = pathname.match(/^\/v1\/jobs\/(\d+)$/);
-    if (req.method === 'GET' && jobMatch) {
-      const id = jobMatch[1];
-      const result = await getJob(id);
-      return new Response(JSON.stringify({ data: result }), { status: 200, headers: { 'Content-Type': 'application/json' } });
-    }
-
-    // ---------------------------------------------------------
-    // Estimates
-    // ---------------------------------------------------------
-    if (req.method === 'POST' && pathname === '/v1/estimate-drafts') {
+    if (req.method === 'POST') {
       const idempotencyKey = req.headers.get('idempotency-key');
       if (!idempotencyKey) {
         throw new HttpError(400, 'MISSING_IDEMPOTENCY_KEY', 'Idempotency-Key header is required for writes.');
       }
-      
+
       const bodyText = await req.text();
       let bodyJson;
       try {
         bodyJson = JSON.parse(bodyText);
       } catch (e) {
-        throw new HttpError(400, 'INVALID_JSON', 'Request body must be valid JSON.');
+        throw new HttpError(400, 'VALIDATION_ERROR', 'Request body is invalid.');
       }
-      
-      const parsedBody = CreateEstimateDraftRequestSchema.parse(bodyJson);
-      const result = await createEstimateDraft(parsedBody, idempotencyKey);
-      
-      return new Response(JSON.stringify({ data: result }), { status: 201, headers: { 'Content-Type': 'application/json' } });
+
+      // POST /v1/jobs
+      if (pathname === '/v1/jobs') {
+        const parsedBody = CreateJobSchema.parse(bodyJson);
+        const result = await withIdempotency(authContext.keyId, 'POST', pathname, idempotencyKey, parsedBody, () => {
+          return createJob(parsedBody, idempotencyKey);
+        });
+        return new Response(JSON.stringify(result), { status: 201, headers: { 'Content-Type': 'application/json' } });
+      }
+
+      // POST /v1/jobs/:jobId/notes
+      const noteMatch = pathname.match(/^\/v1\/jobs\/(\d+)\/notes$/);
+      if (noteMatch) {
+        const jobId = noteMatch[1];
+        const parsedBody = JobNoteSchema.parse(bodyJson);
+        const result = await withIdempotency(authContext.keyId, 'POST', pathname, idempotencyKey, parsedBody, () => {
+          return addJobNote(jobId, parsedBody, idempotencyKey);
+        });
+        return new Response(JSON.stringify(result), { status: 201, headers: { 'Content-Type': 'application/json' } });
+      }
+
+      // POST /v1/appointments
+      if (pathname === '/v1/appointments') {
+        const parsedBody = AppointmentSchema.parse(bodyJson);
+        const result = await withIdempotency(authContext.keyId, 'POST', pathname, idempotencyKey, parsedBody, () => {
+          return addAppointment(parsedBody, idempotencyKey);
+        });
+        return new Response(JSON.stringify(result), { status: 201, headers: { 'Content-Type': 'application/json' } });
+      }
+
+      // POST /v1/estimate-drafts
+      if (pathname === '/v1/estimate-drafts') {
+        const parsedBody = CreateEstimateDraftRequestSchema.parse(bodyJson);
+        const result = await withIdempotency(authContext.keyId, 'POST', pathname, idempotencyKey, parsedBody, () => {
+          return createEstimateDraft(parsedBody, idempotencyKey);
+        });
+        return new Response(JSON.stringify(result), { status: 201, headers: { 'Content-Type': 'application/json' } });
+      }
     }
 
     return new Response(JSON.stringify({ error: 'NOT_FOUND' }), { 
@@ -103,6 +116,12 @@ export default async function handler(req: Request) {
     });
 
   } catch (err: any) {
+    if (err.name === 'ZodError') {
+      return new Response(JSON.stringify({ error: 'VALIDATION_ERROR', message: 'Request body is invalid.', details: err.errors }), { 
+        status: 400, 
+        headers: { 'Content-Type': 'application/json' } 
+      });
+    }
     if (err.statusCode) {
       return new Response(JSON.stringify({ error: err.code, message: err.message }), { 
         status: err.statusCode, 

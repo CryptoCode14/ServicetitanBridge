@@ -6,10 +6,11 @@ const envSchema = z.object({
   ST_CLIENT_SECRET: z.string().min(1),
   ST_APP_KEY: z.string().min(1),
   ST_TENANT_ID: z.string().regex(/^\d+$/),
-  BRIDGE_API_KEY: z.string().min(43),
-  WRITE_MODE: z.enum(['off', 'draft_estimates']).default('off'),
+  BRIDGE_KEY_STORE: z.string().min(2), // JSON string
+  ALLOWED_READ_NAMESPACES: z.string().default('crm,jpm,dispatch,accounting,payroll,timesheets,pricebook,inventory'),
+  WRITE_MODE: z.enum(['off', 'draft_estimates', 'all']).default('off'),
   LOG_LEVEL: z.enum(['info', 'debug']).default('info'),
-  UPSTREAM_TIMEOUT_MS: z.coerce.number().default(8000),
+  UPSTREAM_TIMEOUT_MS: z.coerce.number().default(15000),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -33,11 +34,5 @@ export const authHosts = {
 
 // Invariants
 if (config.ST_ENVIRONMENT === 'production') {
-  if (!config.BRIDGE_API_KEY.startsWith('stb_live_')) {
-    throw new Error("BRIDGE_API_KEY must start with 'stb_live_' in production.");
-  }
-} else if (config.ST_ENVIRONMENT === 'integration') {
-  if (!config.BRIDGE_API_KEY.startsWith('stb_test_')) {
-    throw new Error("BRIDGE_API_KEY must start with 'stb_test_' in integration.");
-  }
+  // Can add prod specific checks here
 }
