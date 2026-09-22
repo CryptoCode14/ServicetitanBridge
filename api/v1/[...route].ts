@@ -12,6 +12,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     let pathname = req.url ? req.url.split('?')[0] : '/';
     
+    if (pathname === '/debug-env') {
+      return res.status(200).json({ keys: Object.keys(process.env) });
+    }
+
     if (pathname === '/healthz' || pathname === '/v1/health' || pathname.endsWith('/healthz') || pathname.endsWith('/v1/health')) {
       return res.status(200).json({ status: 'ok', service: 'servicetitan-bridge' });
     }
