@@ -33,9 +33,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const authContext = authenticate(bridgeKey);
 
     // ---------------------------------------------------------
-    // GET PROXY
+    // CATCH-ALL PROXY (ALL METHODS, ALL NAMESPACES)
     // ---------------------------------------------------------
-    if (req.method === 'GET' && pathname.includes('/v1/proxy/')) {
+    if (pathname.includes('/v1/proxy/')) {
       const proxyIdx = pathname.indexOf('/v1/proxy/');
       const proxyPath = pathname.substring(proxyIdx + '/v1/proxy/'.length);
       const parts = proxyPath.split('/');
@@ -47,21 +47,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
          throw new HttpError(400, 'VALIDATION_ERROR', 'Invalid path segments.');
       }
 
-      const allowedNamespaces = appConfig.ALLOWED_READ_NAMESPACES.split(',').map((n: string) => n.trim());
-      if (!allowedNamespaces.includes(namespace)) {
-        throw new HttpError(400, 'VALIDATION_ERROR', 'Namespace not allowed.');
+      const searchParams = req.url ? req.url.split('?')[1] || '' : '';
+      
+      const stResponse = await stProxyRequest(
+        req.method as string, 
+        namespace, 
+        restOfPath, 
+        searchParams, 
+        (req.method !== 'GET' && req.method !== 'HEAD') ? req.body : undefined
+      );
+      
+      const contentType = stResponse.headers.get('Content-Type') || 'application/json';
+      res.setHeader('Content-Type', contentType);
+      
+      if (stResponse.headers.has('Content-Disposition')) {
+        res.setHeader('Content-Disposition', stResponse.headers.get('Content-Disposition')!);
       }
 
-      const searchParams = req.url ? req.url.split('?')[1] || '' : '';
-      const stResponse = await stProxyRequest('GET', namespace, restOfPath, searchParams);
-      
-      const responseData = await stResponse.json();
-      return res.status(stResponse.status).json(responseData);
-    }
-
-    if (pathname.includes('/v1/proxy/') && req.method !== 'GET') {
-      res.setHeader('Allow', 'GET');
-      return res.status(405).json({ error: 'METHOD_NOT_ALLOWED' });
+      const arrayBuffer = await stResponse.arrayBuffer();
+      return res.status(stResponse.status).send(Buffer.from(arrayBuffer));
     }
 
     // ---------------------------------------------------------

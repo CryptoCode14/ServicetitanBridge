@@ -44,7 +44,7 @@ export async function stRequest<T>(method: string, path: string, body?: unknown,
   }
 }
 
-export async function stProxyRequest(method: string, namespace: string, restOfPath: string, queryParams: string): Promise<Response> {
+export async function stProxyRequest(method: string, namespace: string, restOfPath: string, queryParams: string, body?: unknown): Promise<Response> {
   const path = `/${namespace}/v2/tenant/${config.ST_TENANT_ID}/${restOfPath}${queryParams ? '?' + queryParams : ''}`;
   
   const token = await getToken();
@@ -53,41 +53,59 @@ export async function stProxyRequest(method: string, namespace: string, restOfPa
   const headers = new Headers();
   headers.set('Authorization', `Bearer ${token}`);
   headers.set('ST-App-Key', config.ST_APP_KEY);
-  headers.set('Accept', 'application/json');
+  headers.set('Accept', '*/*');
 
-  let response = await fetch(url, {
+  const fetchOptions: RequestInit = {
     method,
     headers,
     signal: AbortSignal.timeout(config.UPSTREAM_TIMEOUT_MS)
-  });
+  };
+
+  if (body !== undefined && method !== 'GET' && method !== 'HEAD') {
+    headers.set('Content-Type', 'application/json');
+    fetchOptions.body = typeof body === 'string' ? body : JSON.stringify(body);
+  }
+
+  let response = await fetch(url, fetchOptions);
 
   if (response.status === 401) {
     invalidateToken();
     const freshToken = await getToken();
     headers.set('Authorization', `Bearer ${freshToken}`);
-    response = await fetch(url, {
-      method,
-      headers,
-      signal: AbortSignal.timeout(config.UPSTREAM_TIMEOUT_MS)
-    });
+    response = await fetch(url, fetchOptions);
   }
 
   // Sanitize headers to send back
   const responseHeaders = new Headers();
-  responseHeaders.set('Content-Type', 'application/json');
+  const contentType = response.headers.get('Content-Type');
+  if (contentType) {
+    responseHeaders.set('Content-Type', contentType);
+  } else {
+    responseHeaders.set('Content-Type', 'application/json');
+  }
+
   if (response.headers.has('Retry-After')) {
     responseHeaders.set('Retry-After', response.headers.get('Retry-After')!);
   }
-
-  let body = await response.text();
+  
+  if (response.headers.has('Content-Disposition')) {
+    responseHeaders.set('Content-Disposition', response.headers.get('Content-Disposition')!);
+  }
 
   if (!response.ok) {
-    // Sanitize errors
+    if (contentType?.includes('application/json')) {
+      const errorBody = await response.text();
+      return new Response(errorBody || JSON.stringify({ 
+        error: 'UPSTREAM_FAILURE', 
+        status: response.status 
+      }), { status: response.status === 429 ? 429 : 502, headers: responseHeaders });
+    }
     return new Response(JSON.stringify({ 
       error: 'UPSTREAM_FAILURE', 
       status: response.status 
     }), { status: response.status === 429 ? 429 : 502, headers: responseHeaders });
   }
 
-  return new Response(body, { status: response.status, headers: responseHeaders });
+  const arrayBuffer = await response.arrayBuffer();
+  return new Response(arrayBuffer, { status: response.status, headers: responseHeaders });
 }
