@@ -13,6 +13,13 @@ All requests must be directed to the Bridge API, not ServiceTitan directly.
 
 *(Note: The Bridge API Key should be injected dynamically from your secret vault. Do not hardcode it.)*
 
+### Key scopes
+Each Bridge API key carries a scope:
+- `full` — unrestricted: proxy any method/namespace, and explicit mutations (subject to `WRITE_MODE`). Keys minted before scopes existed are grandfathered to `full`, so existing integrations keep working with no changes.
+- `restricted` — read-only: proxy `GET`/`HEAD` only, namespace must be in `ALLOWED_READ_NAMESPACES`, no explicit mutations. New keys should default to `restricted`.
+
+To grant a key full access, add `"scope": "full"` to its record in `BRIDGE_KEY_STORE`.
+
 ## 2. Reading Data (The GET Proxy)
 You have broad read access to ServiceTitan through the Bridge's proxy route. The Bridge automatically attaches the necessary ServiceTitan tenant IDs and OAuth tokens behind the scenes.
 
@@ -96,6 +103,8 @@ Payload:
 
 ## 4. Error Handling
 - `401 Unauthorized`: Your Bridge API Key is missing or invalid.
+- `403 Forbidden`: Your key's scope does not allow this (`INSUFFICIENT_SCOPE` on writes, `NAMESPACE_NOT_ALLOWED` on proxy), or writes are disabled (`WRITE_MODE_DISABLED`).
+- `405 Method Not Allowed`: Restricted keys may only use GET/HEAD on the proxy.
 - `409 Conflict`: You submitted a `POST` request using an `Idempotency-Key` that has already been used for a completely different payload.
 - `429 Too Many Requests`: You are exceeding the Bridge's strict rate limits. Observe the `Retry-After` header.
 - `502 Bad Gateway`: The Bridge encountered a timeout or error when communicating with the upstream ServiceTitan API.

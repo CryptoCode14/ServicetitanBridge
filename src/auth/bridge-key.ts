@@ -1,12 +1,22 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { config } from '../config.js';
 
+export type KeyScope = 'full' | 'restricted';
+
 export interface KeyRecord {
   keyId: string;
   name: string;
   digest: string;
   enabled: boolean;
   expiresAt: string | null;
+  /**
+   * Access scope for this key.
+   * - 'full': unrestricted — proxy any method/namespace; explicit mutations subject to WRITE_MODE.
+   * - 'restricted': read-only — proxy GET/HEAD only, namespace must be in ALLOWED_READ_NAMESPACES, no explicit mutations.
+   * A missing scope is treated as 'full' so keys minted before scopes existed keep their current access (grandfathered).
+   * New keys should default to 'restricted' and be promoted to 'full' only deliberately.
+   */
+  scope?: KeyScope;
 }
 
 let keyStore: KeyRecord[] | null = null;
@@ -35,6 +45,15 @@ export class HttpError extends Error {
   constructor(public statusCode: number, public code: string, message: string) {
     super(message);
   }
+}
+
+/**
+ * Resolve a key's effective scope. Records without a `scope` field
+ * (minted before per-key scopes existed) are grandfathered to 'full',
+ * so existing integrations keep working with zero config changes.
+ */
+export function resolveScope(record: KeyRecord): KeyScope {
+  return record.scope === 'restricted' ? 'restricted' : 'full';
 }
 
 export function authenticate(presentedKey: string | null | undefined): KeyRecord {

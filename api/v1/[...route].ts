@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { authenticate, HttpError } from '../../src/auth/bridge-key.js';
+import { authenticate, resolveScope, HttpError } from '../../src/auth/bridge-key.js';
 import { config as appConfig, validateConfig } from '../../src/config.js';
 import { stProxyRequest } from '../../src/servicetitan/client.js';
 import { createJob, addJobNote, addAppointment } from '../../src/servicetitan/mutations.js';
@@ -11,15 +11,6 @@ import { withIdempotency } from '../../src/policy/idempotency.js';
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     let pathname = req.url ? req.url.split('?')[0] : '/';
-    
-    if (pathname.endsWith('/debug-env')) {
-      return res.status(200).json({ 
-        keys: Object.keys(process.env),
-        projectName: process.env.VERCEL_PROJECT_NAME,
-        url: process.env.VERCEL_URL,
-        gitSlug: process.env.VERCEL_GIT_REPO_SLUG
-      });
-    }
 
     if (pathname === '/healthz' || pathname === '/v1/health' || pathname.endsWith('/healthz') || pathname.endsWith('/v1/health')) {
       return res.status(200).json({ status: 'ok', service: 'servicetitan-bridge' });
@@ -31,9 +22,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const bearerKey = rawAuth.toLowerCase().startsWith('bearer ') ? rawAuth.substring(7).trim() : null;
     const bridgeKey = (req.headers['x-bridge-key'] as string) || bearerKey;
     const authContext = authenticate(bridgeKey);
+    const keyScope = resolveScope(authContext);
+
+    // Debug endpoint requires a valid key (previously unauthenticated).
+    if (pathname.endsWith('/debug-env')) {
+      return res.status(200).json({
+        keys: Object.keys(process.env),
+        projectName: process.env.VERCEL_PROJECT_NAME,
+        url: process.env.VERCEL_URL,
+        gitSlug: process.env.VERCEL_GIT_REPO_SLUG
+      });
+    }
 
     // ---------------------------------------------------------
-    // CATCH-ALL PROXY (ALL METHODS, ALL NAMESPACES)
+    // CATCH-ALL PROXY
+    // 'full' keys: any method, any namespace (unchanged behavior).
+    // 'restricted' keys: GET/HEAD only, namespace must be in ALLOWED_READ_NAMESPACES.
     // ---------------------------------------------------------
     if (pathname.includes('/v1/proxy/')) {
       const proxyIdx = pathname.indexOf('/v1/proxy/');
@@ -45,6 +49,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // Path hardening
       if (restOfPath.includes('..') || restOfPath.includes('\\') || restOfPath.includes('\0') || restOfPath.includes('//')) {
          throw new HttpError(400, 'VALIDATION_ERROR', 'Invalid path segments.');
+      }
+
+      if (keyScope !== 'full') {
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'This API key is restricted to read-only GET requests.');
+        }
+        const allowedNamespaces = appConfig.ALLOWED_READ_NAMESPACES.split(',')
+          .map((s: string) => s.trim().toLowerCase())
+          .filter(Boolean);
+        if (!allowedNamespaces.includes((namespace || '').toLowerCase())) {
+          throw new HttpError(403, 'NAMESPACE_NOT_ALLOWED', `Namespace '${namespace}' is not in the allowlist for this API key.`);
+        }
       }
 
       const searchParams = req.url ? req.url.split('?')[1] || '' : '';
@@ -69,9 +85,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     // ---------------------------------------------------------
-    // EXPLICIT MUTATIONS (POST)
+    // EXPLICIT MUTATIONS (POST) — 'full' scope keys only
     // ---------------------------------------------------------
     if (req.method === 'POST') {
+      if (keyScope !== 'full') {
+        throw new HttpError(403, 'INSUFFICIENT_SCOPE', 'This API key does not have write access.');
+      }
       if (appConfig.WRITE_MODE === 'off') {
         throw new HttpError(403, 'WRITE_MODE_DISABLED', 'Writes are currently disabled in configuration.');
       }
