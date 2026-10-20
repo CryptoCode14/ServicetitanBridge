@@ -1,7 +1,22 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { authenticate, resolveScope, HttpError } from '../../src/auth/bridge-key.js';
 import type { KeyScope } from '../../src/auth/bridge-key.js';
-import { listKeyMetadata, createBridgeKey, revokeBridgeKey } from '../../src/auth/key-store.js';
+import {
+  listKeyMetadata,
+  createBridgeKey,
+  revokeBridgeKey,
+  kvConfigured,
+  keyStoreNotConfiguredError,
+} from '../../src/auth/key-store.js';
+import {
+  setupAdmin,
+  verifyAdminCredentials,
+  adminExists,
+  createSessionToken,
+  sessionUsernameFromCookieHeader,
+  sessionCookieHeader,
+  clearSessionCookieHeader,
+} from '../../src/auth/admin.js';
 import { config as appConfig, validateConfig } from '../../src/config.js';
 import { stProxyRequest } from '../../src/servicetitan/client.js';
 import { createJob, addJobNote, addAppointment } from '../../src/servicetitan/mutations.js';
@@ -23,28 +38,70 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const rawAuth = (req.headers['authorization'] || '') as string;
     const bearerKey = rawAuth.toLowerCase().startsWith('bearer ') ? rawAuth.substring(7).trim() : null;
     const bridgeKey = (req.headers['x-bridge-key'] as string) || bearerKey;
-    const authContext = await authenticate(bridgeKey);
-    const keyScope = resolveScope(authContext);
 
-    // Debug endpoint requires a valid key (previously unauthenticated).
-    if (pathname.endsWith('/debug-env')) {
+    // ---------------------------------------------------------
+    // ADMIN AUTH (used by the /keys page)
+    // The page's human user logs in with a username/password admin account
+    // (one-time setup, stored hashed in KV) — no API key involved. These
+    // endpoints intentionally run BEFORE API-key authentication.
+    // ---------------------------------------------------------
+
+    // POST /v1/admin/setup — one-time admin creation; 409 once an admin exists.
+    if (req.method === 'POST' && pathname === '/v1/admin/setup') {
+      const body = (req.body ?? {}) as { username?: unknown; password?: unknown };
+      const record = await setupAdmin(body.username, body.password);
+      const token = await createSessionToken(record.username);
+      res.setHeader('Set-Cookie', sessionCookieHeader(token));
+      return res.status(201).json({ ok: true, username: record.username });
+    }
+
+    // POST /v1/admin/login — generic 401 on any failure.
+    if (req.method === 'POST' && pathname === '/v1/admin/login') {
+      const body = (req.body ?? {}) as { username?: unknown; password?: unknown };
+      const username = await verifyAdminCredentials(body.username, body.password);
+      if (!username) {
+        throw new HttpError(401, 'INVALID_CREDENTIALS', 'Incorrect username or password.');
+      }
+      const token = await createSessionToken(username);
+      res.setHeader('Set-Cookie', sessionCookieHeader(token));
+      return res.status(200).json({ ok: true, username });
+    }
+
+    // POST /v1/admin/logout — clears the session cookie.
+    if (req.method === 'POST' && pathname === '/v1/admin/logout') {
+      res.setHeader('Set-Cookie', clearSessionCookieHeader());
+      return res.status(200).json({ ok: true });
+    }
+
+    // GET /v1/admin/session — tells the page which state to render.
+    if (req.method === 'GET' && pathname === '/v1/admin/session') {
+      if (!kvConfigured()) {
+        throw keyStoreNotConfiguredError();
+      }
+      const needsSetup = !(await adminExists());
+      const username = await sessionUsernameFromCookieHeader(req.headers.cookie);
       return res.status(200).json({
-        keys: Object.keys(process.env),
-        projectName: process.env.VERCEL_PROJECT_NAME,
-        url: process.env.VERCEL_URL,
-        gitSlug: process.env.VERCEL_GIT_REPO_SLUG
+        needsSetup,
+        authenticated: username !== null,
+        ...(username ? { username } : {}),
       });
     }
 
     // ---------------------------------------------------------
     // KEY ADMIN (used by the /keys page)
-    // Requires an authenticated FULL-scope key. These endpoints mutate
-    // bridge-side key state only — they are not ServiceTitan writes, so
-    // WRITE_MODE does not gate them and no Idempotency-Key is required.
+    // Authorized by EITHER a valid admin session cookie (the human owner)
+    // OR an authenticated FULL-scope API key (agents). Restricted keys get
+    // 403, no auth gets 401. These endpoints mutate bridge-side key state
+    // only — they are not ServiceTitan writes, so WRITE_MODE does not gate
+    // them and no Idempotency-Key is required.
     // ---------------------------------------------------------
     if (pathname === '/v1/admin/keys' || pathname.startsWith('/v1/admin/keys/')) {
-      if (keyScope !== 'full') {
-        throw new HttpError(403, 'INSUFFICIENT_SCOPE', 'Key management requires a full-access key.');
+      const sessionUser = await sessionUsernameFromCookieHeader(req.headers.cookie);
+      if (!sessionUser) {
+        const keyRecord = await authenticate(bridgeKey);
+        if (resolveScope(keyRecord) !== 'full') {
+          throw new HttpError(403, 'INSUFFICIENT_SCOPE', 'Key management requires a full-access key.');
+        }
       }
 
       // GET /v1/admin/keys — metadata only, never digests or raw keys.
@@ -82,6 +139,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
 
       return res.status(404).json({ error: 'NOT_FOUND' });
+    }
+
+    // Everything below requires an API key, exactly as before.
+    const authContext = await authenticate(bridgeKey);
+    const keyScope = resolveScope(authContext);
+
+    // Debug endpoint requires a valid key (previously unauthenticated).
+    if (pathname.endsWith('/debug-env')) {
+      return res.status(200).json({
+        keys: Object.keys(process.env),
+        projectName: process.env.VERCEL_PROJECT_NAME,
+        url: process.env.VERCEL_URL,
+        gitSlug: process.env.VERCEL_GIT_REPO_SLUG
+      });
     }
 
     // ---------------------------------------------------------

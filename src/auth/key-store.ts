@@ -77,6 +77,31 @@ async function kvCommand(command: string[]): Promise<unknown> {
   return data.result ?? null;
 }
 
+/** The shared "writable store not connected" error (admin + key mutations). */
+export function keyStoreNotConfiguredError(): HttpError {
+  return new HttpError(
+    503,
+    'KEY_STORE_NOT_CONFIGURED',
+    'The writable key store is not connected yet. In Vercel: open the servicetitanbridge project, Storage tab, create a KV (Upstash) database and connect it to this project, then redeploy.'
+  );
+}
+
+/** Raw string GET from KV (null when the key is absent). Callers check kvConfigured() first. */
+export async function kvGetString(key: string): Promise<string | null> {
+  const raw = await kvCommand(['GET', key]);
+  return typeof raw === 'string' ? raw : null;
+}
+
+export async function kvSetString(key: string, value: string): Promise<void> {
+  await kvCommand(['SET', key, value]);
+}
+
+/** SET only if absent. Returns true when this call wrote the value. */
+export async function kvSetStringIfAbsent(key: string, value: string): Promise<boolean> {
+  const result = await kvCommand(['SET', key, value, 'NX']);
+  return result === 'OK';
+}
+
 async function loadKvKeyStore(forceRefresh = false): Promise<KeyRecord[]> {
   if (!kvConfigured()) return [];
   const now = Date.now();
@@ -102,11 +127,7 @@ async function loadKvKeyStore(forceRefresh = false): Promise<KeyRecord[]> {
 
 async function saveKvKeyStore(records: KeyRecord[]): Promise<void> {
   if (!kvConfigured()) {
-    throw new HttpError(
-      503,
-      'KEY_STORE_NOT_CONFIGURED',
-      'The writable key store is not connected yet. In Vercel: open the servicetitanbridge project, Storage tab, create a KV (Upstash) database and connect it to this project, then redeploy.'
-    );
+    throw keyStoreNotConfiguredError();
   }
   await kvCommand(['SET', KV_STORE_KEY, JSON.stringify(records)]);
   kvCache = { records, fetchedAt: Date.now() };
@@ -171,11 +192,7 @@ export async function createBridgeKey(
   scope: KeyScope
 ): Promise<{ record: KeyRecord; rawKey: string }> {
   if (!kvConfigured()) {
-    throw new HttpError(
-      503,
-      'KEY_STORE_NOT_CONFIGURED',
-      'The writable key store is not connected yet. In Vercel: open the servicetitanbridge project, Storage tab, create a KV (Upstash) database and connect it to this project, then redeploy.'
-    );
+    throw keyStoreNotConfiguredError();
   }
   const rawKey = 'stb_live_' + randomBytes(32).toString('base64url');
   const record: KeyRecord = {
@@ -197,11 +214,7 @@ export async function createBridgeKey(
  */
 export async function revokeBridgeKey(keyId: string): Promise<KeyMetadata> {
   if (!kvConfigured()) {
-    throw new HttpError(
-      503,
-      'KEY_STORE_NOT_CONFIGURED',
-      'The writable key store is not connected yet. In Vercel: open the servicetitanbridge project, Storage tab, create a KV (Upstash) database and connect it to this project, then redeploy.'
-    );
+    throw keyStoreNotConfiguredError();
   }
   const merged = await loadMergedKeyStore();
   const target = merged.find((r) => r.keyId === keyId);

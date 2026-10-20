@@ -1,7 +1,9 @@
 /**
  * The /keys admin page (served by api/keys.ts). Single static page, vanilla
- * JS, no build step. The admin key lives only in sessionStorage (cleared
- * when the tab closes) and is sent as a Bearer token to /v1/admin/keys.
+ * JS, no build step. The human owner signs in with a username/password
+ * admin account (one-time setup via /v1/admin/setup); the session is an
+ * HttpOnly signed cookie, so no API key ever touches this page. Agents keep
+ * using API keys exactly as before.
  */
 export const KEYS_PAGE_HTML = `<!DOCTYPE html>
 <html lang="en">
@@ -45,6 +47,7 @@ export const KEYS_PAGE_HTML = `<!DOCTYPE html>
   .row button { white-space: nowrap; }
   .hidden { display: none; }
   .topbar { display: flex; justify-content: space-between; align-items: center; }
+  .who { display: flex; gap: 10px; align-items: center; }
 </style>
 </head>
 <body>
@@ -54,17 +57,43 @@ export const KEYS_PAGE_HTML = `<!DOCTYPE html>
       <h1>ServiceTitan Bridge — API Keys</h1>
       <p class="sub">Create, list, and revoke API keys for AI agents and integrations.</p>
     </div>
-    <button id="disconnectBtn" class="secondary small hidden">Disconnect</button>
+    <div class="who">
+      <span id="whoText" class="muted hidden"></span>
+      <button id="logoutBtn" class="secondary small hidden">Log out</button>
+    </div>
   </div>
 
   <div id="errorBox" class="error"></div>
 
-  <div id="connectCard" class="card">
-    <h2>Connect</h2>
-    <p class="muted">Paste a full-access bridge key to manage keys. It is kept only in this tab's session storage and forgotten when the tab closes.</p>
-    <label for="adminKey">Your full-access bridge key</label>
-    <input type="password" id="adminKey" autocomplete="off" placeholder="stb_live_...">
-    <div style="margin-top:14px"><button id="connectBtn">Connect</button></div>
+  <div id="loadingCard" class="card">
+    <p class="muted" style="margin:0">Checking sign-in status...</p>
+  </div>
+
+  <div id="notConnectedCard" class="card hidden">
+    <h2>Key store not connected yet</h2>
+    <p class="muted">The bridge's writable key store is not connected, so sign-in and key management are unavailable. In Vercel: open the servicetitanbridge project, go to the Storage tab, create a KV (Upstash) database and connect it to this project, then redeploy. This page will work as soon as that lands.</p>
+  </div>
+
+  <div id="setupCard" class="card hidden">
+    <h2>Create your admin account</h2>
+    <p class="muted">One-time setup. This account is how you sign in here to manage API keys — no API key needed. Your password is stored only as a secure hash and can never be shown again, so keep it somewhere safe.</p>
+    <label for="setupUsername">Username</label>
+    <input type="text" id="setupUsername" autocomplete="username" maxlength="50">
+    <label for="setupPassword">Password (at least 10 characters)</label>
+    <input type="password" id="setupPassword" autocomplete="new-password">
+    <label for="setupPasswordConfirm">Confirm password</label>
+    <input type="password" id="setupPasswordConfirm" autocomplete="new-password">
+    <div style="margin-top:14px"><button id="setupBtn">Create admin account</button></div>
+  </div>
+
+  <div id="loginCard" class="card hidden">
+    <h2>Sign in</h2>
+    <p class="muted">Sign in with your admin account to manage API keys.</p>
+    <label for="loginUsername">Username</label>
+    <input type="text" id="loginUsername" autocomplete="username">
+    <label for="loginPassword">Password</label>
+    <input type="password" id="loginPassword" autocomplete="current-password">
+    <div style="margin-top:14px"><button id="loginBtn">Sign in</button></div>
   </div>
 
   <div id="main" class="hidden">
@@ -105,13 +134,15 @@ export const KEYS_PAGE_HTML = `<!DOCTYPE html>
 
 <script>
 (function () {
-  var adminKey = sessionStorage.getItem('bridgeAdminKey') || '';
   var els = {
     error: document.getElementById('errorBox'),
-    connectCard: document.getElementById('connectCard'),
+    loading: document.getElementById('loadingCard'),
+    notConnected: document.getElementById('notConnectedCard'),
+    setupCard: document.getElementById('setupCard'),
+    loginCard: document.getElementById('loginCard'),
     main: document.getElementById('main'),
-    disconnect: document.getElementById('disconnectBtn'),
-    adminKey: document.getElementById('adminKey'),
+    logout: document.getElementById('logoutBtn'),
+    who: document.getElementById('whoText'),
     keysBody: document.getElementById('keysBody'),
     newKeyBox: document.getElementById('newKeyBox'),
     newKeyValue: document.getElementById('newKeyValue')
@@ -123,13 +154,14 @@ export const KEYS_PAGE_HTML = `<!DOCTYPE html>
   }
 
   function api(method, path, body) {
-    var opts = { method: method, headers: { 'Authorization': 'Bearer ' + adminKey, 'Content-Type': 'application/json' } };
+    var opts = { method: method, credentials: 'same-origin', headers: { 'Content-Type': 'application/json' } };
     if (body) opts.body = JSON.stringify(body);
     return fetch(path, opts).then(function (resp) {
       return resp.json().catch(function () { return {}; }).then(function (data) {
         if (!resp.ok) {
           var err = new Error(data.message || data.error || ('Request failed (' + resp.status + ')'));
           err.status = resp.status;
+          err.code = data.error;
           throw err;
         }
         return data;
@@ -143,6 +175,15 @@ export const KEYS_PAGE_HTML = `<!DOCTYPE html>
     return String(s).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
+  }
+
+  function showOnly(card) {
+    [els.loading, els.notConnected, els.setupCard, els.loginCard, els.main].forEach(function (c) {
+      c.classList.toggle('hidden', c !== card);
+    });
+    var authed = card === els.main;
+    els.logout.classList.toggle('hidden', !authed);
+    els.who.classList.toggle('hidden', !authed);
   }
 
   function renderKeys(keys) {
@@ -167,7 +208,10 @@ export const KEYS_PAGE_HTML = `<!DOCTYPE html>
         btn.disabled = true;
         api('POST', '/v1/admin/keys/' + encodeURIComponent(id) + '/revoke')
           .then(loadKeys)
-          .catch(function (e) { showError(e.message); btn.disabled = false; });
+          .catch(function (e) {
+            if (e.status === 401) { refreshState(); }
+            showError(e.message); btn.disabled = false;
+          });
       });
     });
   }
@@ -176,32 +220,73 @@ export const KEYS_PAGE_HTML = `<!DOCTYPE html>
     return api('GET', '/v1/admin/keys').then(function (data) { renderKeys(data.keys || []); });
   }
 
-  function setConnected(connected) {
-    els.connectCard.classList.toggle('hidden', connected);
-    els.main.classList.toggle('hidden', !connected);
-    els.disconnect.classList.toggle('hidden', !connected);
+  function refreshState() {
+    showOnly(els.loading);
+    return api('GET', '/v1/admin/session').then(function (state) {
+      showError('');
+      if (state.needsSetup) {
+        showOnly(els.setupCard);
+      } else if (!state.authenticated) {
+        showOnly(els.loginCard);
+      } else {
+        els.who.textContent = state.username ? ('Signed in as ' + state.username) : '';
+        showOnly(els.main);
+        loadKeys().catch(function (e) { showError(e.message); });
+      }
+    }).catch(function (e) {
+      if (e.status === 503) {
+        showOnly(els.notConnected);
+      } else {
+        showOnly(els.loginCard);
+        showError('Something went wrong checking sign-in status. Reload to try again.');
+      }
+    });
   }
 
-  document.getElementById('connectBtn').addEventListener('click', function () {
-    var value = els.adminKey.value.trim();
-    if (!value) { showError('Paste your full-access bridge key first.'); return; }
-    adminKey = value;
+  document.getElementById('setupBtn').addEventListener('click', function () {
+    var username = document.getElementById('setupUsername').value.trim();
+    var password = document.getElementById('setupPassword').value;
+    var confirm = document.getElementById('setupPasswordConfirm').value;
+    if (username.length < 3) { showError('Choose a username of at least 3 characters.'); return; }
+    if (password.length < 10) { showError('Password must be at least 10 characters.'); return; }
+    if (password !== confirm) { showError('Passwords do not match.'); return; }
     showError('');
-    loadKeys().then(function () {
-      sessionStorage.setItem('bridgeAdminKey', adminKey);
-      setConnected(true);
+    var btn = this;
+    btn.disabled = true;
+    api('POST', '/v1/admin/setup', { username: username, password: password }).then(function () {
+      btn.disabled = false;
+      refreshState();
     }).catch(function (e) {
-      adminKey = '';
-      showError(e.status === 401 ? 'That key was not accepted. Use a valid full-access bridge key.' : e.message);
+      btn.disabled = false;
+      if (e.status === 503) { showOnly(els.notConnected); return; }
+      showError(e.message);
+      if (e.status === 409) refreshState();
     });
   });
 
-  els.disconnect.addEventListener('click', function () {
-    adminKey = '';
-    sessionStorage.removeItem('bridgeAdminKey');
-    els.adminKey.value = '';
-    setConnected(false);
+  document.getElementById('loginBtn').addEventListener('click', function () {
+    var username = document.getElementById('loginUsername').value.trim();
+    var password = document.getElementById('loginPassword').value;
+    if (!username || !password) { showError('Enter your username and password.'); return; }
     showError('');
+    var btn = this;
+    btn.disabled = true;
+    api('POST', '/v1/admin/login', { username: username, password: password }).then(function () {
+      btn.disabled = false;
+      document.getElementById('loginPassword').value = '';
+      refreshState();
+    }).catch(function (e) {
+      btn.disabled = false;
+      if (e.status === 503) { showOnly(els.notConnected); return; }
+      showError(e.status === 401 ? 'Incorrect username or password.' : e.message);
+    });
+  });
+
+  els.logout.addEventListener('click', function () {
+    api('POST', '/v1/admin/logout').catch(function () {}).then(function () {
+      els.who.textContent = '';
+      refreshState();
+    });
   });
 
   document.getElementById('createBtn').addEventListener('click', function () {
@@ -215,7 +300,10 @@ export const KEYS_PAGE_HTML = `<!DOCTYPE html>
       els.newKeyBox.style.display = 'block';
       document.getElementById('newName').value = '';
       loadKeys();
-    }).catch(function (e) { showError(e.message); });
+    }).catch(function (e) {
+      if (e.status === 401) { refreshState(); }
+      showError(e.message);
+    });
   });
 
   document.getElementById('copyBtn').addEventListener('click', function () {
@@ -228,12 +316,7 @@ export const KEYS_PAGE_HTML = `<!DOCTYPE html>
     }
   });
 
-  if (adminKey) {
-    loadKeys().then(function () { setConnected(true); }).catch(function () {
-      adminKey = '';
-      sessionStorage.removeItem('bridgeAdminKey');
-    });
-  }
+  refreshState();
 })();
 </script>
 </body>
