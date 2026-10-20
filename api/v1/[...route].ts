@@ -1,5 +1,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { authenticate, resolveScope, HttpError } from '../../src/auth/bridge-key.js';
+import type { KeyScope } from '../../src/auth/bridge-key.js';
+import { listKeyMetadata, createBridgeKey, revokeBridgeKey } from '../../src/auth/key-store.js';
 import { config as appConfig, validateConfig } from '../../src/config.js';
 import { stProxyRequest } from '../../src/servicetitan/client.js';
 import { createJob, addJobNote, addAppointment } from '../../src/servicetitan/mutations.js';
@@ -21,7 +23,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const rawAuth = (req.headers['authorization'] || '') as string;
     const bearerKey = rawAuth.toLowerCase().startsWith('bearer ') ? rawAuth.substring(7).trim() : null;
     const bridgeKey = (req.headers['x-bridge-key'] as string) || bearerKey;
-    const authContext = authenticate(bridgeKey);
+    const authContext = await authenticate(bridgeKey);
     const keyScope = resolveScope(authContext);
 
     // Debug endpoint requires a valid key (previously unauthenticated).
@@ -32,6 +34,54 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         url: process.env.VERCEL_URL,
         gitSlug: process.env.VERCEL_GIT_REPO_SLUG
       });
+    }
+
+    // ---------------------------------------------------------
+    // KEY ADMIN (used by the /keys page)
+    // Requires an authenticated FULL-scope key. These endpoints mutate
+    // bridge-side key state only — they are not ServiceTitan writes, so
+    // WRITE_MODE does not gate them and no Idempotency-Key is required.
+    // ---------------------------------------------------------
+    if (pathname === '/v1/admin/keys' || pathname.startsWith('/v1/admin/keys/')) {
+      if (keyScope !== 'full') {
+        throw new HttpError(403, 'INSUFFICIENT_SCOPE', 'Key management requires a full-access key.');
+      }
+
+      // GET /v1/admin/keys — metadata only, never digests or raw keys.
+      if (req.method === 'GET' && pathname === '/v1/admin/keys') {
+        return res.status(200).json({ keys: await listKeyMetadata() });
+      }
+
+      // POST /v1/admin/keys — create; raw key returned exactly once.
+      if (req.method === 'POST' && pathname === '/v1/admin/keys') {
+        const body = (req.body ?? {}) as { name?: unknown; scope?: unknown };
+        const name = typeof body.name === 'string' ? body.name.trim() : '';
+        if (!name || name.length > 100) {
+          throw new HttpError(400, 'VALIDATION_ERROR', 'A key name of 1-100 characters is required.');
+        }
+        const scope: KeyScope = body.scope === 'full' ? 'full' : 'restricted';
+        const { record, rawKey } = await createBridgeKey(name, scope);
+        return res.status(201).json({
+          key: {
+            keyId: record.keyId,
+            name: record.name,
+            scope,
+            enabled: true,
+            expiresAt: null,
+          },
+          apiKey: rawKey,
+          warning: 'This key is shown once and cannot be retrieved again. Copy it now.',
+        });
+      }
+
+      // POST /v1/admin/keys/:keyId/revoke
+      const revokeMatch = pathname.match(/^\/v1\/admin\/keys\/([^/]+)\/revoke$/);
+      if (req.method === 'POST' && revokeMatch) {
+        const key = await revokeBridgeKey(decodeURIComponent(revokeMatch[1]));
+        return res.status(200).json({ key });
+      }
+
+      return res.status(404).json({ error: 'NOT_FOUND' });
     }
 
     // ---------------------------------------------------------

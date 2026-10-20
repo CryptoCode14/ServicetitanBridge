@@ -11,6 +11,11 @@ const envSchema = z.object({
   WRITE_MODE: z.enum(['off', 'draft_estimates', 'all']).default('off'),
   LOG_LEVEL: z.enum(['info', 'debug']).default('info'),
   UPSTREAM_TIMEOUT_MS: z.coerce.number().default(15000),
+  // Optional: injected automatically when a Vercel KV (Upstash) store is
+  // connected to the project. When absent, the writable key store is disabled
+  // and authentication uses the env BRIDGE_KEY_STORE alone (original behavior).
+  KV_REST_API_URL: z.string().optional(),
+  KV_REST_API_TOKEN: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse({
@@ -24,6 +29,8 @@ const parsed = envSchema.safeParse({
   WRITE_MODE: process.env.WRITE_MODE,
   LOG_LEVEL: process.env.LOG_LEVEL,
   UPSTREAM_TIMEOUT_MS: process.env.UPSTREAM_TIMEOUT_MS,
+  KV_REST_API_URL: process.env.KV_REST_API_URL,
+  KV_REST_API_TOKEN: process.env.KV_REST_API_TOKEN,
 });
 
 export const configError = parsed.success ? null : parsed.error;

@@ -1,5 +1,8 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { config } from '../config.js';
+import { HttpError } from './errors.js';
+import { loadMergedKeyStore } from './key-store.js';
+
+export { HttpError } from './errors.js';
 
 export type KeyScope = 'full' | 'restricted';
 
@@ -19,32 +22,8 @@ export interface KeyRecord {
   scope?: KeyScope;
 }
 
-let keyStore: KeyRecord[] | null = null;
-
-function loadKeyStore(): KeyRecord[] {
-  if (keyStore) return keyStore;
-  try {
-    const raw = JSON.parse(config.BRIDGE_KEY_STORE);
-    if (Array.isArray(raw)) {
-      keyStore = raw as KeyRecord[];
-    } else {
-      keyStore = [raw as KeyRecord];
-    }
-  } catch (err) {
-    console.error("Failed to parse BRIDGE_KEY_STORE", err);
-    keyStore = [];
-  }
-  return keyStore;
-}
-
 function digest(value: string): Buffer {
   return createHash('sha256').update(value, 'utf8').digest();
-}
-
-export class HttpError extends Error {
-  constructor(public statusCode: number, public code: string, message: string) {
-    super(message);
-  }
 }
 
 /**
@@ -56,27 +35,32 @@ export function resolveScope(record: KeyRecord): KeyScope {
   return record.scope === 'restricted' ? 'restricted' : 'full';
 }
 
-export function authenticate(presentedKey: string | null | undefined): KeyRecord {
+/**
+ * Authenticate a presented raw key against the merged key store
+ * (env BRIDGE_KEY_STORE union the writable KV store; see key-store.ts).
+ * Existing env keys keep working whether or not KV is connected.
+ */
+export async function authenticate(presentedKey: string | null | undefined): Promise<KeyRecord> {
   const presented = presentedKey ?? '';
   if (!presented) {
     throw new HttpError(401, 'AUTHENTICATION_FAILED', 'Valid bridge credentials are required.');
   }
 
-  const store = loadKeyStore();
+  const store = await loadMergedKeyStore();
   const presentedDigestBuf = digest(presented);
 
   let matchedRecord: KeyRecord | null = null;
 
   for (const record of store) {
     if (!record.enabled) continue;
-    
+
     let rawExpectedDigest = record.digest;
     if (rawExpectedDigest.startsWith('sha256:')) {
       rawExpectedDigest = rawExpectedDigest.split(':')[1];
     }
-    
+
     const expectedBuf = Buffer.from(rawExpectedDigest, 'hex');
-    
+
     if (expectedBuf.length === presentedDigestBuf.length) {
       if (timingSafeEqual(presentedDigestBuf, expectedBuf)) {
         matchedRecord = record;
@@ -89,7 +73,7 @@ export function authenticate(presentedKey: string | null | undefined): KeyRecord
   }
 
   if (matchedRecord.expiresAt && new Date(matchedRecord.expiresAt) < new Date()) {
-     throw new HttpError(401, 'AUTHENTICATION_FAILED', 'Valid bridge credentials are required.');
+    throw new HttpError(401, 'AUTHENTICATION_FAILED', 'Valid bridge credentials are required.');
   }
 
   return matchedRecord;

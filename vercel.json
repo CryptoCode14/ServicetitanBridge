@@ -1,15 +1,1 @@
-{
-  "version": 2,
-  "builds": [
-    {
-      "src": "api/v1/[...route].ts",
-      "use": "@vercel/node"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/v1/(.*)",
-      "dest": "/api/v1/[...route].ts"
-    }
-  ]
-}
+{"builds":[{"src":"api/v1/[...route].ts","use":"@vercel/node"},{"src":"api/keys.ts","use":"@vercel/node"}],"routes":[{"dest":"/api/v1/[...route].ts","src":"/v1/(.*)"},{"dest":"/api/keys.ts","src":"/keys"}],"version":2}
