@@ -7,7 +7,7 @@ const envSchema = z.object({
   ST_APP_KEY: z.string().min(1),
   ST_TENANT_ID: z.string().regex(/^\d+$/),
   BRIDGE_KEY_STORE: z.string().min(2), // JSON string
-  ALLOWED_READ_NAMESPACES: z.string().default('crm,jpm,dispatch,accounting,payroll,timesheets,pricebook,inventory'),
+  ALLOWED_READ_NAMESPACES: z.string().default('crm,jpm,dispatch,accounting,payroll,timesheets,pricebook,inventory,sales'),
   WRITE_MODE: z.enum(['off', 'draft_estimates', 'all']).default('off'),
   LOG_LEVEL: z.enum(['info', 'debug']).default('info'),
   UPSTREAM_TIMEOUT_MS: z.coerce.number().default(15000),
