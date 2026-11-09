@@ -28,14 +28,28 @@ export async function createJob(req: CreateJobRequest, idempotencyKey: string): 
     summary: req.summary
   };
 
-  if (req.scheduledWindow || req.assignedTechnicianIds) {
-    payload.appointments = [{
+  if (req.campaignId !== undefined) {
+    payload.campaignId = req.campaignId;
+  }
+
+  // Appointments: prefer the caller's native `appointments` array (ServiceTitan's
+  // own shape) and pass it straight through. Otherwise build a one-entry array
+  // from scheduledWindow / assignedTechnicianIds (bridge convenience shape).
+  // ServiceTitan requires at least one appointment window on job create; a job
+  // sent with neither is rejected upstream, and the surfaced error now says why.
+  if (req.appointments && req.appointments.length > 0) {
+    payload.appointments = req.appointments;
+  } else if (req.scheduledWindow || req.assignedTechnicianIds) {
+    const appt: any = {
       start: req.scheduledWindow?.start,
       end: req.scheduledWindow?.end,
       arrivalWindowStart: req.scheduledWindow?.arrivalWindowStart,
       arrivalWindowEnd: req.scheduledWindow?.arrivalWindowEnd,
-      technicianIds: req.assignedTechnicianIds || []
-    }];
+    };
+    if (req.assignedTechnicianIds && req.assignedTechnicianIds.length > 0) {
+      appt.technicianIds = req.assignedTechnicianIds;
+    }
+    payload.appointments = [appt];
   }
 
   const jobResult = await stRequest('POST', path, payload);
