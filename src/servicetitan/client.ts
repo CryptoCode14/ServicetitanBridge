@@ -33,7 +33,18 @@ export async function stRequest<T>(method: string, path: string, body?: unknown,
   }
 
   if (!response.ok) {
-    throw new HttpError(response.status === 429 ? 429 : 502, 'UPSTREAM_FAILURE', `Upstream Error: ${response.status}`);
+    // Surface ServiceTitan's real error (RFC 7807 Problem Details: type/title/
+    // detail/traceId) instead of a bare status, so callers can see why a write
+    // was rejected. The status is still mapped to 502 (429 stays 429) so the
+    // bridge's error contract does not change.
+    let errDetail = '';
+    try {
+      errDetail = await response.text();
+    } catch {
+      errDetail = '';
+    }
+    const message = `Upstream Error: ${response.status}${errDetail ? ` ${errDetail}` : ''}`;
+    throw new HttpError(response.status === 429 ? 429 : 502, 'UPSTREAM_FAILURE', message.slice(0, 2000));
   }
 
   const text = await response.text();
